@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import imageio.v2 as imageio
+import os
+import io
 
 class CityDeliveryEnv:
     def __init__(self, grid_map):
@@ -34,11 +37,6 @@ class CityDeliveryEnv:
         # Текущие динамические переменные
         self.agent_pos = None
         self.vehicles = []  # Список активных машин
-
-    def start(self):
-        self.reset(np.random.choice(len(self.start_positions)))
-
-
 
     def reset(self, start_idx):
         """Сброс состояния среды перед новым эпизодом."""
@@ -78,7 +76,7 @@ class CityDeliveryEnv:
         
         # Условие 1: Авария (столкновение с машиной)
         if self.agent_pos in vehicles_positions:
-            reward = -100
+            reward = -5
             done = True
             info["status"] = "crash"
             
@@ -93,11 +91,11 @@ class CityDeliveryEnv:
     def _get_observation(self):
         """Возвращает текущее состояние среды."""
         return {
-            "agent_pos": self.agent_pos,
+            "agent_pos": self.agent_pos[0] * self.width + self.agent_pos[1],
             "vehicles_pos": [v["pos"] for v in self.vehicles]
         }
     
-    def _update_vehicles(self, spawn_prob: float = 0.02):
+    def _update_vehicles(self, spawn_prob: float = 0.1):
         """Логика спавна и движения сторонних автомобилей."""
         
         # 1. Спавн новых машин в точках '3' с вероятностью (например, 0.02)
@@ -162,8 +160,184 @@ class CityDeliveryEnv:
             
         self.vehicles = updated_vehicles
 
+class Draw_Grid:
+    def __init__(self, env: CityDeliveryEnv):
+        self.env = env
+        self.fig, self.ax = plt.subplots(figsize=(8, 8))
+
+    def render_frame(self, step):
+        self.ax.clear()
+        
+        # Создаем RGB матрицу для карты
+        img = np.ones((self.env.height, self.env.width, 3)) * 0.9 
+        
+        # Закрашиваем объекты на карте
+        for r in range(self.env.height):
+            for c in range(self.env.width):
+                if self.env.base_map[r, c] == 1:
+                    img[r, c] = [0.2, 0.2, 0.2] # Стены
+                elif self.env.base_map[r, c] == 4:
+                    img[r, c] = [0.4, 0.8, 0.4] # Цель
+
+        self.ax.imshow(img, origin='upper')
+
+        for i, v in enumerate(self.env.vehicles):
+            r, c = v["pos"]
+            self.ax.plot(c, r, 'bs', markersize=12, label='Трафик' if i == 0 else "")
+
+        if self.env.agent_pos:
+            r, c = self.env.agent_pos
+            self.ax.plot(c, r, 'ro', markersize=14, label='Агент')
+
+        self.ax.set_title(f'Эпизод тестирования. Шаг: {step}', fontsize=14)
+        self.ax.set_xticks(np.arange(-0.5, self.env.width, 1))
+        self.ax.set_yticks(np.arange(-0.5, self.env.height, 1))
+        self.ax.set_xticklabels([])
+        self.ax.set_yticklabels([])
+        self.ax.grid(True, color='black', linestyle='-', linewidth=0.5)
+
+        handles, labels = self.ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        if by_label:
+            self.ax.legend(by_label.values(), by_label.keys(), bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        # СОХРАНЯЕМ В ОПЕРАТИВНУЮ ПАМЯТЬ
+        buf = io.BytesIO()
+        self.fig.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        return buf
+
+class QLearningAgent:
+    def __init__(self, n_states, n_actions, alpha=0.1, gamma=0.99, epsilon=0.2):
+        """
+        Инициализация агента.
+        :param n_states: Количество состояний в среде
+        :param n_actions: Количество возможных действий
+        :param alpha: Скорость обучения
+        :param gamma: Коэффициент дисконтирования
+        :param epsilon: Параметр вероятности случайного действия
+        """
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        
+        # Инициализация Q-таблицы нулями для всех состояний и действий
+        self.q_table = np.zeros((n_states, n_actions))
+
+    def choose_action(self, state):
+        """
+        Выбор действия на основе эпсилон-жадной стратегии.
+        """
+        if np.random.uniform(0, 1) < self.epsilon:
+            # Исследование: выбираем случайное действие
+            return np.random.randint(0, self.n_actions - 1)
+        else:
+            # Эксплуатация: выбираем действие с максимальным Q-значением для текущего состояния
+            return np.argmax(self.q_table[state])
+
+    def update_q_value(self, state, action, reward, next_state):
+        """
+        Обновление Q-таблицы по формуле Беллмана.
+        """
+        # Находим максимальную оценку Q для следующего состояния
+        max_next_q = np.max(self.q_table[next_state])
+        
+        # Вычисляем новое значение Q
+        current_q = self.q_table[state, action]
+        td_target = reward + self.gamma * max_next_q
+        
+        # Обновляем Q-значение
+        self.q_table[state, action] = current_q + self.alpha * (td_target - current_q)
+
 if __name__ == '__main__':
     with open('citymap.txt', 'r', encoding='utf-8') as f:
         lines = [list(line.strip()) for line in f if line.strip()]
-    Enviroment = CityDeliveryEnv(np.array(lines, dtype='U1').astype(int))
-    Enviroment.start()
+    env = CityDeliveryEnv(np.array(lines, dtype='U1').astype(int))
+
+    # ==========================================
+    # Пример тренировочного цикла (псевдокод для интеграции со средой)
+    # ==========================================
+
+    agent = QLearningAgent(n_states = (env.height * env.width),
+                            n_actions = len(env.actions),
+                            alpha=0.1, gamma=0.99, epsilon= 1.0)
+
+    epsilon_min = 0.01 # Минимальная доля случайных шагов
+    epsilon_decay = 0.999
+    n_episodes = 5000
+    
+    for episode in range(n_episodes):
+        env.reset(np.random.choice(len(env.start_positions)))
+        state = env._get_observation()['agent_pos'] # Получаем начальное состояние от среды
+        done = False
+
+        steps = 0
+        max_steps_per_episode = 300
+        while not done and steps < max_steps_per_episode:  # Ограничение на количество шагов в эпизоде
+            # 1. Агент выбирает действие
+            action = agent.choose_action(state)
+            
+            # 2. Среда выполняет действие, возвращает новое состояние, награду и флаг завершения
+            observ, reward, done, info = env.step(action)
+            next_state = observ['agent_pos']
+            
+            # 3. Агент обновляет свои знания в Q-таблице
+            agent.update_q_value(state, action, reward, next_state)
+            
+            # 4. Переход в новое состояние
+            state = next_state
+            steps += 1
+
+        # В конце эпизода уменьшаем epsilon
+        if agent.epsilon > epsilon_min:
+            agent.epsilon *= epsilon_decay
+    
+    # ==========================================
+    # Тестирование агента и создание GIF-анимации
+    # ==========================================
+    print("Обучение завершено. Начинаем генерацию GIF...")
+    
+    agent.epsilon = 0.0 
+    env.reset(np.random.choice(len(env.start_positions)))
+    state = env._get_observation()['agent_pos']
+    done = False
+    
+    drawer = Draw_Grid(env)
+    step = 0
+    max_test_steps = 300 
+    gif_name = "city_delivery_agent.gif"
+    
+    try:
+        # Открываем writer, который будет записывать GIF на лету
+        with imageio.get_writer(gif_name, mode='I', fps=4) as writer:
+            
+            while not done and step < max_test_steps:
+                # 1. Получаем кадр в виде буфера в памяти
+                buf = drawer.render_frame(step)
+                # 2. Читаем его и сразу добавляем в GIF
+                writer.append_data(imageio.imread(buf))
+                buf.close() # Очищаем буфер текущего кадра
+                
+                # 3. Агент делает шаг
+                action = agent.choose_action(state)
+                observ, reward, done, info = env.step(action)
+                state = observ['agent_pos']
+                
+                step += 1
+
+            # Записываем последний кадр (результат прибытия или аварии)
+            buf = drawer.render_frame(step)
+            writer.append_data(imageio.imread(buf))
+            buf.close()
+
+        print(f"Готово! Анимация сохранена в файл '{gif_name}'. Статус: {info['status']}")
+
+    except Exception as e:
+        print(f"Процесс прерван из-за ошибки: {e}")
+        
+    finally:
+        # Этот блок выполнится В ЛЮБОМ СЛУЧАЕ
+        # Освобождаем память, занятую графиками matplotlib
+        plt.close(drawer.fig)
